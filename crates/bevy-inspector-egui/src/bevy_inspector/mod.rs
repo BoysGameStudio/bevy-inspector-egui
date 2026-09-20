@@ -44,7 +44,7 @@ use std::path::Path;
 use crate::utils::{self, pretty_type_name, pretty_type_name_str};
 use bevy_asset::{Asset, AssetServer, Assets, ReflectAsset, UntypedAssetId};
 use bevy_ecs::component::Mutable;
-use bevy_ecs::query::{QueryFilter, WorldQuery};
+use bevy_ecs::query::QueryFilter;
 use bevy_ecs::resource::IsResource;
 use bevy_ecs::world::CommandQueue;
 use bevy_ecs::{component::ComponentId, prelude::*};
@@ -252,7 +252,7 @@ pub fn ui_for_entities(world: &mut World, ui: &mut egui::Ui) {
 
 /// Display all entities matching the given [`EntityFilter`].
 ///
-/// You can use the [`Filter`] type to specify both a static filter as a generic parameter (default is `Without<Parent>`),
+/// You can use the [`Filter`] type to specify both a static filter as a generic parameter (default is `(Without<ChildOf>, Without<IsResource>)`),
 /// and a word to match. [`Filter::from_ui`] will display a search box and fuzzy filter checkbox.
 pub fn ui_for_entities_filtered<F>(
     world: &mut World,

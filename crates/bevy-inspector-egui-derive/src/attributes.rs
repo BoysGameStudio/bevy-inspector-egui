@@ -1,17 +1,37 @@
 use proc_macro2::TokenStream;
 use quote::quote;
+use syn::ext::IdentExt;
 
 fn is_reflect_ignore(attribute: &syn::Attribute) -> bool {
     if !attribute.path().is_ident("reflect") {
         return false;
     }
 
-    let mut ignore = false;
-    let _ = attribute.parse_nested_meta(|meta| {
-        ignore = meta.path.is_ident("ignore");
-        Ok(())
-    });
-    ignore
+    attribute
+        .parse_args_with(|input: syn::parse::ParseStream| {
+            input.parse_terminated(parse_reflect_ignore_flag, syn::Token![,])
+        })
+        .is_ok_and(|flags| flags.into_iter().any(|ignored| ignored))
+}
+
+fn parse_reflect_ignore_flag(input: syn::parse::ParseStream) -> syn::Result<bool> {
+    // Bevy permits custom @ expressions and assigned defaults alongside ignore.
+    // Consume each complete argument so its order cannot change field indexing.
+    if input.peek(syn::Token![@]) {
+        input.parse::<syn::Token![@]>()?;
+        input.parse::<syn::Expr>()?;
+        return Ok(false);
+    }
+    let name = input.call(syn::Ident::parse_any)?;
+    if input.peek(syn::Token![=]) {
+        input.parse::<syn::Token![=]>()?;
+        if name == "remote" {
+            input.parse::<syn::Type>()?;
+        } else {
+            input.parse::<syn::Expr>()?;
+        }
+    }
+    Ok(name == "ignore")
 }
 pub fn is_reflect_ignore_field(field: &syn::Field) -> bool {
     field.attrs.iter().any(is_reflect_ignore)

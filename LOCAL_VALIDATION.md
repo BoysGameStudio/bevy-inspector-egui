@@ -24,6 +24,13 @@ keys, and a Copy iterator whose copies share external state. Selection is
 materialized once; the selected view and remainder must be disjoint. These tests
 inspect permissions without creating overlapping mutable references.
 
+Bevy resources also occupy canonical entity-component slots. Partition tests
+cover both names of those allocations: resource splits, typed resource borrows,
+component splits and mixed/duplicate selections must revoke the other view's
+access through either name. The alias map is captured while the root view owns
+the exclusive World borrow and shared immutably; derived views do not reread the
+unsafe resource cache while another view holds a resource reference.
+
 ## Maintained fork compatibility matrix
 
 The package version remains 0.37.0; it does not identify this fork's Bevy/egui

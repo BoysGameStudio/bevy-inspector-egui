@@ -9,6 +9,8 @@ use bevy_ecs::{
 use bevy_reflect::{Reflect, ReflectFromPtr, TypeRegistry};
 use smallvec::{SmallVec, smallvec};
 use std::any::{Any, TypeId};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 #[derive(Debug)]
 pub enum Error {
@@ -48,6 +50,9 @@ type EntityComponent = (Entity, TypeId);
 /// ```
 pub struct RestrictedWorldView<'w> {
     world: UnsafeWorldCell<'w>,
+    // Snapshot metadata while borrowing the whole World exclusively. Derived
+    // views cannot structurally change it, and share this immutable alias map.
+    resource_components: Arc<HashMap<TypeId, Entity>>,
     resources: Allowed<TypeId>,
     components: Allowed<EntityComponent>,
 }
@@ -127,28 +132,43 @@ impl<'a> From<&'a mut World> for RestrictedWorldView<'a> {
 impl<'w> RestrictedWorldView<'w> {
     /// Create a new [`RestrictedWorldView`] with permission to access everything.
     pub fn new(world: &'w mut World) -> RestrictedWorldView<'w> {
+        let resource_components = world
+            .resource_entities()
+            .iter()
+            .filter_map(|(id, entity)| {
+                world
+                    .components()
+                    .get_info(id)?
+                    .type_id()
+                    .map(|ty| (ty, entity))
+            })
+            .collect();
         // INVARIANTS: `world` is `&mut` so we have access to everything
         RestrictedWorldView {
             world: world.as_unsafe_world_cell(),
+            resource_components: Arc::new(resource_components),
             resources: Allowed::everything(),
             components: Allowed::everything(),
         }
     }
 
-    /// Splits the world into one view which may only be used for resource access, and another which may only be used for component access.
+    /// Splits resources from all other components. A resource's canonical
+    /// entity-component alias belongs to the resource view as well.
     pub fn resources_components(
         world: &'w mut World,
     ) -> (RestrictedWorldView<'w>, RestrictedWorldView<'w>) {
-        let world = world.as_unsafe_world_cell();
+        let view = Self::new(world);
 
         // INVARIANTS: `world` is `&mut` so we have access to everything
         let resources = RestrictedWorldView {
-            world,
+            world: view.world,
+            resource_components: view.resource_components.clone(),
             resources: Allowed::everything(),
             components: Allowed::nothing(),
         };
         let components = RestrictedWorldView {
-            world,
+            world: view.world,
+            resource_components: view.resource_components,
             resources: Allowed::nothing(),
             components: Allowed::everything(),
         };
@@ -156,6 +176,9 @@ impl<'w> RestrictedWorldView<'w> {
         (resources, components)
     }
 
+    /// Returns the underlying cell without granting any additional access.
+    /// Raw access must respect this view's permissions and must not change
+    /// component/resource membership while any derived view or borrow is live.
     pub fn world(&self) -> UnsafeWorldCell<'w> {
         self.world
     }
@@ -166,7 +189,15 @@ impl<'w> RestrictedWorldView<'w> {
     }
     /// Whether the given component at the entity may be accessed from this world view
     pub fn allows_access_to_component(&self, component: EntityComponent) -> bool {
-        self.components.allows_access_to(component)
+        if self.is_resource_component(component) {
+            self.resources.allows_access_to(component.1)
+        } else {
+            self.components.allows_access_to(component)
+        }
+    }
+
+    fn is_resource_component(&self, (entity, ty): EntityComponent) -> bool {
+        self.resource_components.get(&ty) == Some(&entity)
     }
 
     /// Splits this view into one view that only has access the the resource `resource` (`.0`), and the rest (`.1`).
@@ -179,11 +210,13 @@ impl<'w> RestrictedWorldView<'w> {
         // INVARIANTS: `self` had `resource` access, so `split` has access if we remove it from `self`
         let split = RestrictedWorldView {
             world: self.world,
+            resource_components: self.resource_components.clone(),
             resources: Allowed::allow_just(resource),
             components: Allowed::nothing(),
         };
         let rest = RestrictedWorldView {
             world: self.world,
+            resource_components: self.resource_components.clone(),
             resources: self.resources.without(resource),
             components: self.components.clone(),
         };
@@ -203,6 +236,7 @@ impl<'w> RestrictedWorldView<'w> {
 
         let rest = RestrictedWorldView {
             world: self.world,
+            resource_components: self.resource_components,
             resources: self.resources.without(type_id),
             components: self.components,
         };
@@ -215,16 +249,21 @@ impl<'w> RestrictedWorldView<'w> {
         &mut self,
         component: EntityComponent,
     ) -> (RestrictedWorldView<'_>, RestrictedWorldView<'_>) {
+        if self.is_resource_component(component) {
+            return self.split_off_resource(component.1);
+        }
         assert!(self.allows_access_to_component(component));
 
         // INVARIANTS: `self` had `component` access, so `split` has access if we remove it from `self`
         let split = RestrictedWorldView {
             world: self.world,
+            resource_components: self.resource_components.clone(),
             resources: Allowed::nothing(),
             components: Allowed::allow_just(component),
         };
         let rest = RestrictedWorldView {
             world: self.world,
+            resource_components: self.resource_components.clone(),
             resources: self.resources.clone(),
             components: self.components.without(component),
         };
@@ -251,15 +290,27 @@ impl<'w> RestrictedWorldView<'w> {
             }
         }
 
-        // INVARIANTS: every selected pair was accessible and is excluded from rest.
+        // Resource components have two names for one allocation. Partition them
+        // in the resource domain so neither alias remains in the other view.
+        let resources: SmallVec<[TypeId; 2]> = selected
+            .iter()
+            .filter(|&&key| self.is_resource_component(key))
+            .map(|key| key.1)
+            .collect();
+        selected.retain(|key| !self.is_resource_component(*key));
+
+        // INVARIANTS: every selected value was accessible and both of its names
+        // are excluded from rest. Ordinary components retain pair permissions.
         let split = RestrictedWorldView {
             world: self.world,
-            resources: Allowed::nothing(),
+            resource_components: self.resource_components.clone(),
+            resources: Allowed::allow(resources.iter().copied()),
             components: Allowed::allow(selected.iter().copied()),
         };
         let rest = RestrictedWorldView {
             world: self.world,
-            resources: self.resources.clone(),
+            resource_components: self.resource_components.clone(),
+            resources: self.resources.without_many(resources.into_iter()),
             components: self.components.without_many(selected.into_iter()),
         };
 
@@ -516,6 +567,129 @@ mod tests {
     #[reflect(Resource)]
     struct B(String);
 
+    fn resource_alias<R: Resource>(world: &World) -> (Entity, TypeId) {
+        let type_id = TypeId::of::<R>();
+        let id = world.components().get_id(type_id).unwrap();
+        (world.resource_entities().get(id).unwrap(), type_id)
+    }
+
+    #[test]
+    fn resource_component_aliases_follow_resource_partitions() {
+        let mut world = World::new();
+        world.insert_resource(B::default());
+        let alias = resource_alias::<B>(&world);
+        let (mut resources, components) = RestrictedWorldView::resources_components(&mut world);
+
+        // Check permissions first: never create overlapping references to expose
+        // this bug. Both names address the same resource allocation in Bevy 0.19.
+        assert!(!components.allows_access_to_component(alias));
+        assert!(resources.allows_access_to_component(alias));
+        let (selected, rest) = resources.split_off_resource(alias.1);
+        assert!(selected.allows_access_to_resource(alias.1));
+        assert!(selected.allows_access_to_component(alias));
+        assert!(!rest.allows_access_to_resource(alias.1));
+        assert!(!rest.allows_access_to_component(alias));
+    }
+
+    #[test]
+    fn component_alias_splits_also_partition_resource_permissions() {
+        let mut world = World::new();
+        world.insert_resource(B::default());
+        let alias = resource_alias::<B>(&world);
+        let mut registry = TypeRegistry::default();
+        registry.register::<B>();
+        for batch in [false, true] {
+            let mut view = RestrictedWorldView::new(&mut world);
+            let (mut selected, rest) = if batch {
+                view.split_off_components([alias, alias].into_iter())
+            } else {
+                view.split_off_component(alias)
+            };
+            assert!(!rest.allows_access_to_resource(alias.1));
+            assert!(!rest.allows_access_to_component(alias));
+            assert!(selected.allows_access_to_resource(alias.1));
+            assert!(selected.allows_access_to_component(alias));
+            selected
+                .get_entity_component_reflect(alias.0, alias.1, &registry)
+                .unwrap()
+                .downcast_mut::<B>()
+                .unwrap()
+                .0
+                .push_str("component");
+            selected
+                .get_resource_mut::<B>()
+                .unwrap()
+                .0
+                .push_str("resource");
+            let (nested, empty) = selected.split_off_resource(alias.1);
+            assert!(nested.allows_access_to_component(alias));
+            assert!(!empty.allows_access_to_component(alias));
+        }
+        assert_eq!(
+            world.resource::<B>().0,
+            "componentresourcecomponentresource"
+        );
+    }
+
+    #[test]
+    fn mixed_resource_and_component_selections_partition_both_domains() {
+        #[derive(Component)]
+        struct Ordinary;
+        let mut world = World::new();
+        world.insert_resource(A("a".into()));
+        world.insert_resource(B::default());
+        let keys = [
+            resource_alias::<A>(&world),
+            resource_alias::<B>(&world),
+            (world.spawn(Ordinary).id(), TypeId::of::<Ordinary>()),
+        ];
+        for mask in 0..8 {
+            let mut view = RestrictedWorldView::new(&mut world);
+            let selection = keys
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| mask & (1 << index) != 0)
+                .flat_map(|(_, key)| [*key, *key]);
+            let (mut selected, rest) = view.split_off_components(selection);
+            for (index, &key) in keys.iter().enumerate() {
+                let chosen = mask & (1 << index) != 0;
+                assert_eq!(selected.allows_access_to_component(key), chosen);
+                assert_eq!(rest.allows_access_to_component(key), !chosen);
+                if index < 2 {
+                    assert_eq!(selected.allows_access_to_resource(key.1), chosen);
+                    assert_eq!(rest.allows_access_to_resource(key.1), !chosen);
+                }
+            }
+            if mask & 1 != 0 {
+                let (_, remainder) = selected.split_off_component(keys[0]);
+                assert!(!remainder.allows_access_to_resource(keys[0].1));
+                assert!(!remainder.allows_access_to_component(keys[0]));
+                assert_eq!(
+                    remainder.allows_access_to_resource(keys[1].1),
+                    mask & 2 != 0
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn typed_resource_borrow_excludes_its_reflected_component_alias() {
+        let mut world = World::new();
+        world.insert_resource(B::default());
+        let alias = resource_alias::<B>(&world);
+        let mut registry = TypeRegistry::default();
+        registry.register::<B>();
+        let (mut resource, mut rest) = RestrictedWorldView::new(&mut world)
+            .split_off_resource_typed::<B>()
+            .unwrap();
+        assert!(!rest.allows_access_to_component(alias));
+        assert!(matches!(
+            rest.get_entity_component_reflect(alias.0, alias.1, &registry),
+            Err(super::Error::NoAccessToComponent(_))
+        ));
+        resource.0.push_str("exclusive");
+    }
+
     #[test]
     fn disjoint_resource_access() {
         let mut world = World::new();
@@ -712,6 +886,7 @@ mod tests {
                         };
                         let mut view = RestrictedWorldView {
                             world: world.as_unsafe_world_cell(),
+                            resource_components: Default::default(),
                             resources: super::Allowed::everything(),
                             components: policy,
                         };
