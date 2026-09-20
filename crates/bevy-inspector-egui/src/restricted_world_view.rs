@@ -83,12 +83,9 @@ impl<T: Clone + PartialEq> Allowed<T> {
     fn without(&self, value: T) -> Allowed<T> {
         match self {
             Allowed::AllowList(list) => {
-                let position = list
-                    .iter()
-                    .position(|item| *item == value)
-                    .expect("called `without` without access");
+                assert!(list.contains(&value), "called `without` without access");
                 let mut new = list.clone();
-                new.swap_remove(position);
+                new.retain(|item| *item != value);
                 Allowed::AllowList(new)
             }
             Allowed::ForbidList(list) => {
@@ -104,14 +101,10 @@ impl<T: Clone + PartialEq> Allowed<T> {
     {
         match self {
             Allowed::AllowList(list) => {
-                let new = list.clone();
+                let mut new = list.clone();
                 for value in values {
-                    let position = list
-                        .iter()
-                        .position(|item| *item == value)
-                        .expect("called `without` without access");
-                    let mut new = list.clone();
-                    new.swap_remove(position);
+                    assert!(list.contains(&value), "called `without` without access");
+                    new.retain(|item| *item != value);
                 }
                 Allowed::AllowList(new)
             }
@@ -239,25 +232,35 @@ impl<'w> RestrictedWorldView<'w> {
         (split, rest)
     }
 
-    /// Splits this view into one view that only has access the the component-entity pairs `components` (`.0`), and the rest (`.1`)
+    /// Splits this view into selected component-entity pairs (`.0`) and the rest (`.1`).
+    ///
+    /// The iterator is consumed exactly once. Duplicate pairs have set semantics:
+    /// they grant one permission in the selected view and none in the remainder.
+    /// Panics before returning either view if any pair is inaccessible.
     pub fn split_off_components(
         &mut self,
-        components: impl Iterator<Item = EntityComponent> + Copy,
+        components: impl Iterator<Item = EntityComponent>,
     ) -> (RestrictedWorldView<'_>, RestrictedWorldView<'_>) {
+        // Copy iterators may share external state; multiple traversals need not
+        // produce the same keys. Validate and partition one stable selection.
+        let mut selected: SmallVec<[EntityComponent; 2]> = SmallVec::new();
         for component in components {
             assert!(self.allows_access_to_component(component));
+            if !selected.contains(&component) {
+                selected.push(component);
+            }
         }
 
-        // INVARIANTS: `self` had `component` access, so `split` has access if we remove it from `self`
+        // INVARIANTS: every selected pair was accessible and is excluded from rest.
         let split = RestrictedWorldView {
             world: self.world,
             resources: Allowed::nothing(),
-            components: Allowed::allow(components),
+            components: Allowed::allow(selected.iter().copied()),
         };
         let rest = RestrictedWorldView {
             world: self.world,
             resources: self.resources.clone(),
-            components: self.components.without_many(components),
+            components: self.components.without_many(selected.into_iter()),
         };
 
         (split, rest)
@@ -604,5 +607,153 @@ mod tests {
 
         component.downcast_mut::<ComponentA>().unwrap().0.clear();
         resource.0.clear();
+    }
+
+    #[derive(Clone, Copy)]
+    struct CopySlice<'a>(&'a [super::EntityComponent]);
+    impl Iterator for CopySlice<'_> {
+        type Item = super::EntityComponent;
+        fn next(&mut self) -> Option<Self::Item> {
+            let (first, rest) = self.0.split_first()?;
+            self.0 = rest;
+            Some(*first)
+        }
+    }
+
+    #[test]
+    fn nested_component_partition_removes_selected_access() {
+        let mut world = World::new();
+        let entity = world.spawn(ComponentA("a".into())).id();
+        let keys = [(entity, TypeId::of::<ComponentA>())];
+        let mut view = RestrictedWorldView::new(&mut world);
+        let (mut allowed, _) = view.split_off_component(keys[0]);
+        let (taken, remainder) = allowed.split_off_components(CopySlice(&keys));
+        assert!(taken.allows_access_to_component(keys[0]));
+        assert!(!remainder.allows_access_to_component(keys[0]));
+    }
+
+    #[test]
+    fn component_partition_consumes_copy_iterator_only_once() {
+        use std::cell::Cell;
+        #[derive(Clone, Copy)]
+        struct Changing<'a> {
+            calls: &'a Cell<usize>,
+            keys: [super::EntityComponent; 2],
+            emitted: bool,
+        }
+        impl Iterator for Changing<'_> {
+            type Item = super::EntityComponent;
+            fn next(&mut self) -> Option<Self::Item> {
+                if self.emitted {
+                    return None;
+                }
+                self.emitted = true;
+                let count = self.calls.get();
+                self.calls.set(count + 1);
+                Some(self.keys[count % 2])
+            }
+        }
+        let mut world = World::new();
+        let a = world.spawn(ComponentA("a".into())).id();
+        let b = world.spawn(ComponentA("b".into())).id();
+        let keys = [
+            (a, TypeId::of::<ComponentA>()),
+            (b, TypeId::of::<ComponentA>()),
+        ];
+        let calls = Cell::new(0);
+        let mut view = RestrictedWorldView::new(&mut world);
+        let (taken, remainder) = view.split_off_components(Changing {
+            calls: &calls,
+            keys,
+            emitted: false,
+        });
+        assert_eq!(calls.get(), 1);
+        assert!(taken.allows_access_to_component(keys[0]));
+        assert!(!remainder.allows_access_to_component(keys[0]));
+        assert!(!taken.allows_access_to_component(keys[1]));
+        assert!(remainder.allows_access_to_component(keys[1]));
+    }
+
+    #[test]
+    fn component_partition_matrix_is_disjoint_and_preserves_the_complement() {
+        let mut world = World::new();
+        let keys = ["a", "b", "c"].map(|name| {
+            (
+                world.spawn(ComponentA(name.into())).id(),
+                TypeId::of::<ComponentA>(),
+            )
+        });
+        for allowed_mask in 0u8..8 {
+            for selected_mask in 0u8..8 {
+                if selected_mask & !allowed_mask != 0 {
+                    continue;
+                }
+                for whitelist in [false, true] {
+                    for duplicated in [false, true] {
+                        let selected: Vec<_> = keys
+                            .iter()
+                            .enumerate()
+                            .filter(|(index, _)| selected_mask & (1 << index) != 0)
+                            .flat_map(|(_, key)| {
+                                std::iter::repeat_n(*key, if duplicated { 2 } else { 1 })
+                            })
+                            .collect();
+                        let entries = keys
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(index, key)| {
+                                ((allowed_mask & (1 << index) != 0) == whitelist).then_some(*key)
+                            })
+                            .collect();
+                        let policy = if whitelist {
+                            super::Allowed::AllowList(entries)
+                        } else {
+                            super::Allowed::ForbidList(entries)
+                        };
+                        let mut view = RestrictedWorldView {
+                            world: world.as_unsafe_world_cell(),
+                            resources: super::Allowed::everything(),
+                            components: policy,
+                        };
+                        let (mut taken, remainder) =
+                            view.split_off_components(CopySlice(&selected));
+                        for (index, key) in keys.iter().enumerate() {
+                            assert_eq!(
+                                taken.allows_access_to_component(*key),
+                                selected_mask & (1 << index) != 0
+                            );
+                            assert_eq!(
+                                remainder.allows_access_to_component(*key),
+                                allowed_mask & (1 << index) != 0
+                                    && selected_mask & (1 << index) == 0
+                            );
+                        }
+                        assert!(!taken.allows_access_to_resource(TypeId::of::<A>()));
+                        assert!(remainder.allows_access_to_resource(TypeId::of::<A>()));
+                        if let Some(key) = selected.first() {
+                            let (_, rest) = taken.split_off_component(*key);
+                            assert!(!rest.allows_access_to_component(*key));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn component_partition_rejects_unavailable_access_before_splitting() {
+        let mut world = World::new();
+        let a = world.spawn(ComponentA("a".into())).id();
+        let b = world.spawn(ComponentA("b".into())).id();
+        let a = (a, TypeId::of::<ComponentA>());
+        let b = (b, TypeId::of::<ComponentA>());
+        let mut view = RestrictedWorldView::new(&mut world);
+        let (mut allowed, _) = view.split_off_component(a);
+        let rejected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            allowed.split_off_components(CopySlice(&[b]));
+        }));
+        assert!(rejected.is_err());
+        assert!(allowed.allows_access_to_component(a));
+        assert!(!allowed.allows_access_to_component(b));
     }
 }

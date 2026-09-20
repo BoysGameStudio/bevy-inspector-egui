@@ -9,7 +9,6 @@ This crate contains
 - utility functions for displaying bevy resource, entities and assets in [bevy_inspector]
 - some drop-in plugins in [quick] to get you started without any code necessary.
 
-The changelog can be found at [`docs/CHANGELOG.md`](./docs/CHANGELOG.md).
 
 # Use case 1: Quick plugins
 
@@ -19,7 +18,6 @@ These plugins can be easily added to your app, but don't allow for customization
 
 Displays the world's entities, resources and assets.
 
-![image of the world inspector](https://raw.githubusercontent.com/jakobhellermann/bevy-inspector-egui/main/docs/images/world_inspector.png)
 
 ```rust
 use bevy::prelude::*;
@@ -113,14 +111,13 @@ fn inspector_ui(world: &mut World) {
             });
 
             ui.heading("Entities");
-            bevy_inspector_egui::bevy_inspector::ui_for_world_entities(world, ui);
+            bevy_inspector_egui::bevy_inspector::ui_for_entities(world, ui);
         });
     });
 }
 ```
 
 Pair this with a crate like [`egui_dock`](https://docs.rs/egui_dock/latest/egui_dock/) and you have your own editor in less than 100 lines: [`examples/egui_dock.rs`](https://github.com/jakobhellermann/bevy-inspector-egui/blob/main/crates/bevy-inspector-egui/examples/integrations/egui_dock.rs).
-![image of the egui_dock example](https://raw.githubusercontent.com/jakobhellermann/bevy-inspector-egui/main/docs/images/egui_dock.png)
 
 ## Cargo features
 
