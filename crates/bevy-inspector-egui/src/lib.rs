@@ -25,11 +25,12 @@
 //!
 //! ```no_run
 //! use bevy::prelude::*;
-//! use bevy_inspector_egui::quick::WorldInspectorPlugin;
+//! use bevy_inspector_egui::{bevy_egui::EguiPlugin, quick::WorldInspectorPlugin};
 //!
 //! fn main() {
 //!     App::new()
 //!         .add_plugins(DefaultPlugins)
+//!         .add_plugins(EguiPlugin::default())
 //!         .add_plugins(WorldInspectorPlugin::new())
 //!         .run();
 //! }
@@ -43,7 +44,7 @@
 //! ```no_run
 //! use bevy::prelude::*;
 //! use bevy_inspector_egui::prelude::*;
-//! use bevy_inspector_egui::quick::ResourceInspectorPlugin;
+//! use bevy_inspector_egui::{bevy_egui::EguiPlugin, quick::ResourceInspectorPlugin};
 //!
 //! // `InspectorOptions` are completely optional
 //! #[derive(Reflect, Resource, Default, InspectorOptions)]
@@ -57,6 +58,7 @@
 //! fn main() {
 //!     App::new()
 //!         .add_plugins(DefaultPlugins)
+//!         .add_plugins(EguiPlugin::default())
 //!         .init_resource::<Configuration>() // `ResourceInspectorPlugin` won't initialize the resource
 //!         .register_type::<Configuration>() // you need to register your type to display it
 //!         .add_plugins(ResourceInspectorPlugin::<Configuration>::default())
@@ -78,8 +80,6 @@
 //! use bevy_egui::{EguiPlugin, EguiContext, EguiPrimaryContextPass};
 //! use bevy_inspector_egui::prelude::*;
 //! use bevy_inspector_egui::bevy_inspector;
-//! use bevy_window::PrimaryWindow;
-//! use std::any::TypeId;
 //!
 //! fn main() {
 //!     App::new()

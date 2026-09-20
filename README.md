@@ -1,25 +1,26 @@
 # bevy-inspector-egui
 
-Examples can be found at [`./crates/bevy-inspector-egui/examples`](./crates/bevy-inspector-egui/examples/).
+Bevy reflection and ECS inspection through egui: inspect resources, entities,
+assets and custom values, or compose a custom editor from the inspection helpers.
 
-This crate contains
+This is the BoysGameStudio fork of
+[jakobhellermann/bevy-inspector-egui](https://github.com/jakobhellermann/bevy-inspector-egui).
+The maintained integration uses Bevy 0.19, egui 0.35 and bevy_egui 0.41.1;
+Cargo manifests and the resolved lock determine exact source identities.
+The package's 0.37.0 version alone does not identify these fork fixes.
 
-- general purpose machinery for displaying [`Reflect`](bevy_reflect::Reflect) values in [reflect_inspector],
-- a way of associating arbitrary options with fields and enum variants in [inspector_options]
-- utility functions for displaying bevy resource, entities and assets in [bevy_inspector]
-- some drop-in plugins in [quick] to get you started without any code necessary.
+## Start with a world inspector
 
+Use this checkout's `crates/bevy-inspector-egui` package as a path dependency and
+add the egui plugin before the inspector:
 
-# Use case 1: Quick plugins
+```toml
+[dependencies]
+bevy = "=0.19.1"
+bevy-inspector-egui = { path = "../bevy-inspector-egui/crates/bevy-inspector-egui" }
+```
 
-These plugins can be easily added to your app, but don't allow for customization of the presentation and content.
-
-## WorldInspectorPlugin
-
-Displays the world's entities, resources and assets.
-
-
-```rust
+```rust,no_run
 use bevy::prelude::*;
 use bevy_inspector_egui::{bevy_egui::EguiPlugin, quick::WorldInspectorPlugin};
 
@@ -33,147 +34,16 @@ fn main() {
 }
 ```
 
-The `quick::WorldInspectorPlugin` is meant for simple use cases. If you want to customize it,
-it's actually very easy to copy the implementation and tweak it. An example of this can be found in the [world_inspector_manual.rs](crates/bevy-inspector-egui/examples/basic/world_inspector_manual.rs) example.
+The quick plugins are useful for simple inspection. Custom windows, resource
+options and reflected values are covered by the usage guide and examples.
 
-## ResourceInspectorPlugin
+## Documentation
 
-Display a single resource in a window.
+- [Usage guide](https://github.com/BoysGameStudio/bevy-inspector-egui/blob/bevy-egui-0.41/docs/usage.md).
+- [Examples](https://github.com/BoysGameStudio/bevy-inspector-egui/blob/bevy-egui-0.41/crates/bevy-inspector-egui/examples/README.md).
+- [Local validation](https://github.com/BoysGameStudio/bevy-inspector-egui/blob/bevy-egui-0.41/LOCAL_VALIDATION.md): feature/derive/permission checks and consumer boundaries.
+- [Agent instructions](https://github.com/BoysGameStudio/bevy-inspector-egui/blob/bevy-egui-0.41/AGENTS.md).
+- [MIT](https://github.com/BoysGameStudio/bevy-inspector-egui/blob/bevy-egui-0.41/LICENSE-MIT.md) / [Apache-2.0](https://github.com/BoysGameStudio/bevy-inspector-egui/blob/bevy-egui-0.41/LICENSE-APACHE.md) licenses.
 
-![image of the resource inspector](https://raw.githubusercontent.com/jakobhellermann/bevy-inspector-egui/main/docs/images/resource_inspector.png)
-
-```rust
-use bevy::prelude::*;
-use bevy_inspector_egui::prelude::*;
-use bevy_inspector_egui::quick::ResourceInspectorPlugin;
-
-// `InspectorOptions` are completely optional
-#[derive(Reflect, Resource, Default, InspectorOptions)]
-#[reflect(Resource, InspectorOptions)]
-struct Configuration {
-    name: String,
-    #[inspector(min = 0.0, max = 1.0)]
-    option: f32,
-}
-
-fn main() {
-    App::new()
-        .add_plugins(DefaultPlugins)
-        .init_resource::<Configuration>() // `ResourceInspectorPlugin` won't initialize the resource
-        .register_type::<Configuration>() // you need to register your type to display it
-        .add_plugins(EguiPlugin::default())
-        .add_plugins(ResourceInspectorPlugin::<Configuration>::default())
-        // also works with built-in resources, as long as they are `Reflect`
-        .add_plugins(ResourceInspectorPlugin::<Time>::default())
-        .run();
-}
-```
-
-<hr>
-
-There is also the [`StateInspectorPlugin`](quick::StateInspectorPlugin) and the [`AssetInspectorPlugin`](quick::AssetInspectorPlugin).
-
-# Use case 2: Manual UI
-
-The [quick] plugins don't allow customization of the egui window or its content, but you can easily build your own UI:
-
-```rust
-use bevy::prelude::*;
-use bevy_egui::EguiPlugin;
-use bevy_inspector_egui::prelude::*;
-use std::any::TypeId;
-
-fn main() {
-    App::new()
-        .add_plugins(DefaultPlugins)
-        .add_plugins(EguiPlugin::default())
-        .add_plugins(bevy_inspector_egui::DefaultInspectorConfigPlugin) // adds default options and `InspectorEguiImpl`s
-        .add_systems(EguiPrimaryContextPass, inspector_ui)
-        .run();
-}
-
-fn inspector_ui(world: &mut World) {
-    let Ok(egui_context) = world
-        .query_filtered::<&mut EguiContext, With<PrimaryEguiContext>>()
-        .get_single(world)
-    else {
-        return;
-    };
-    let mut egui_context = egui_context.clone();
-
-    egui::Window::new("UI").show(egui_context.get_mut(), |ui| {
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            // equivalent to `WorldInspectorPlugin`
-            bevy_inspector_egui::bevy_inspector::ui_for_world(world, ui);
-
-            egui::CollapsingHeader::new("Materials").show(ui, |ui| {
-                bevy_inspector_egui::bevy_inspector::ui_for_assets::<StandardMaterial>(world, ui);
-            });
-
-            ui.heading("Entities");
-            bevy_inspector_egui::bevy_inspector::ui_for_entities(world, ui);
-        });
-    });
-}
-```
-
-Pair this with a crate like [`egui_dock`](https://docs.rs/egui_dock/latest/egui_dock/) and you have your own editor in less than 100 lines: [`examples/egui_dock.rs`](https://github.com/jakobhellermann/bevy-inspector-egui/blob/main/crates/bevy-inspector-egui/examples/integrations/egui_dock.rs).
-
-## Cargo features
-
-- `highlight_changes` - highlight changed values every frame.
-  Ideally this should be runtime-configurable, but it was implemented like this as a stopgap solution. If you'd like to configure this at runtime, please open an issue to let me know it's more of a priority.
-- `bevy_pbr` (default): register default options for `bevy_pbr` types. You should disable this if you don't use `bevy_pbr` to reduce the dependency footprint.
-- `bevy_gizmos`: enable inspecting of `GizmoConfigGroup`
-
-## FAQ
-
-**Q: How do I change the names of the entities in the world inspector?**
-
-**A:** You can insert the [`Name`](https://docs.rs/bevy_core/latest/bevy_core/struct.Name.html) component.
-
-**Q: What if I just want to display a single value without passing in the whole `&mut World`?**
-
-**A:** You can use `reflect_inspector::ui_for_value`. Note that displaying things like `Handle<StandardMaterial>` won't be able to display the asset's value.
-
-**Q:** Can I change how exactly my type is displayed?
-
-**A:** Implement `InspectorPrimitive` and call `app.register_type_data::<T, InspectorEguiImpl>`.
-
-[reflect_inspector]: https://docs.rs/bevy-inspector-egui/latest/bevy_inspector_egui/reflect_inspector
-[inspector_options]: https://docs.rs/bevy-inspector-egui/latest/bevy_inspector_egui/inspector_options
-[quick]: https://docs.rs/bevy-inspector-egui/latest/bevy_inspector_egui/quick
-[bevy_inspector]: https://docs.rs/bevy-inspector-egui/latest/bevy_inspector_egui/bevy_inspector
-
-## Bevy support table
-
-| bevy | bevy-inspector-egui |
-|------|---------------------|
-| 0.19 | 0.37                |
-| 0.18 | 0.36                |
-| 0.17 | 0.35                |
-| 0.17 | 0.34                |
-| 0.16 | 0.33                |
-| 0.16 | 0.32                |
-| 0.16 | 0.31                |
-| 0.15 | 0.30                |
-| 0.15 | 0.29                |
-| 0.15 | 0.28                |
-| 0.14 | 0.27                |
-| 0.14 | 0.26                |
-| 0.14 | 0.25                |
-| 0.13 | 0.24                |
-| 0.13 | 0.23                |
-| 0.12 | 0.22                |
-| 0.12 | 0.21                |
-| 0.11 | 0.19-0.20           |
-| 0.10 | 0.18                |
-| 0.9  | 0.14-0.17           |
-| 0.8  | 0.12-0.13           |
-| 0.7  | 0.10-0.11           |
-| 0.6  | 0.9                 |
-| 0.6  | 0.8                 |
-| 0.6  | 0.7                 |
-| 0.5  | 0.5-0.6             |
-| 0.5  | 0.4                 |
-| 0.4  | 0.1-0.3             |
+Generate API documentation from this checkout with
+`cargo doc -p bevy-inspector-egui --no-deps`; upstream docs.rs may differ.
